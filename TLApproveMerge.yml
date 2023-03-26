@@ -74,7 +74,7 @@ jobs:
         run: echo "$NEWRELEASEVER"
           
 #########################################################
-##### Get Shared Library from il-shani-shared        ####
+##### Get Shared Library from Devops-Andrey-pyhon-shared        ####
 #########################################################
 
       - uses: robinraju/release-downloader@v1.7
@@ -89,7 +89,7 @@ jobs:
           latest: true
           tarBall: true
           out-file-path : shared
-      - name: Get Shared Library from il-shani-shared
+      - name: Get Shared Library from Devops-Andrey-pyhon-shared
         if: |
                contains(github.event.repository.name, 'python-bo-') ||
                contains(github.event.repository.name, 'python-phone-recognizer')
