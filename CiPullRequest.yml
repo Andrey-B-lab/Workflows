@@ -62,7 +62,7 @@
             contains(github.event.repository.name, 'python-phone-recognizer')
        run: |
              ls shared
-             tar -xvzf shared/il-shany-shared-${{steps.releasever.outputs.tag_name}}.tar.gz 
+             tar -xvzf shared/pyhon-shared-${{steps.releasever.outputs.tag_name}}.tar.gz 
              dir=$(ls | grep -i  "Devops-Andrey-pyhon-shared")
              cp $dir/dist/Shared-0.0.0.tar.gz .
              
