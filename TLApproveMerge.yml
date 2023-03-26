@@ -1,0 +1,203 @@
+name: TLApproveMerge
+ 
+on:
+ workflow_call:
+     
+env:
+    release_version_tag : ""
+jobs:
+  steps:
+     if: |
+          (github.event.pull_request.merged == true) &&
+          (contains(github.head_ref, 'patch/') || (contains(github.head_ref, 'feature/')))
+          
+     runs-on: ubuntu-latest
+     steps:
+      - uses: actions/checkout@v3
+      
+ 
+#########################################################
+#####  Get Latested release  from branch             ####           
+#########################################################   
+  
+      - name: Get Latested release from branch
+        id: release
+        continue-on-error: true
+        run: |
+               git fetch --tags
+               git fetch --prune --unshallow || true
+               export LATEST_RELEASE_VERSION=$(git describe --abbrev=0 --tags)
+               echo "latest-release=$(echo $LATEST_RELEASE_VERSION)" >> $GITHUB_OUTPUT
+               echo "$LATEST_RELEASE_VERSION" >> tag.txt
+          
+           
+#########################################################
+#####  checking if its first release                 ####           
+#########################################################
+      
+      - name: first release
+        
+        if: ${{ !contains (steps.release.outputs.latest-release ,'v') }}
+        run: echo TAGWITHOUTV='0.0.0' >> $GITHUB_ENV
+               
+      
+      - name: Remove v from tag
+        if: ${{ contains(steps.release.outputs.latest-release ,'v') }}
+        run: echo "TAGWITHOUTV=$(cat tag.txt | sed 's/v//')" >> $GITHUB_ENV
+                    
+      - name: Bump minor version
+        if: "contains(github.head_ref, 'fea')"
+        id: bump_minor_version
+        uses: christian-draeger/increment-semantic-version@1.0.3
+        with:
+          current-version: ${{ env.TAGWITHOUTV }}
+          version-fragment: 'feature'
+        
+      - name: Set the environment variable  
+        if: "contains(github.head_ref, 'fea')"
+        run: echo NEWRELEASEVER=v${{steps.bump_minor_version.outputs.next-version }} >> $GITHUB_ENV
+
+      - name: Bump patch version
+        if: "contains(github.head_ref, 'patch')"
+        id: bump_patch_version
+        uses: christian-draeger/increment-semantic-version@1.0.3
+        with:
+          current-version:  ${{ env.TAGWITHOUTV }}
+          version-fragment: 'bug'
+        
+      - name: Set the environment variable  
+        if: "contains(github.head_ref, 'patch')"
+        run: echo NEWRELEASEVER=v${{steps.bump_patch_version.outputs.next-version }} >> $GITHUB_ENV
+
+
+      - name: print new release tag
+        run: echo "$NEWRELEASEVER"
+          
+#########################################################
+##### Get Shared Library from il-shani-shared        ####
+#########################################################
+
+      - uses: robinraju/release-downloader@v1.7
+        name: get shared library files
+        if:  | 
+               contains(github.event.repository.name, 'python-bo-') ||
+               contains(github.event.repository.name, 'python-phone-recognizer')
+        id : releasever
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: "Devops-Andrey/pyhon-shared"
+          latest: true
+          tarBall: true
+          out-file-path : shared
+      - name: Get Shared Library from il-shani-shared
+        if: |
+               contains(github.event.repository.name, 'python-bo-') ||
+               contains(github.event.repository.name, 'python-phone-recognizer')
+        run: |
+              ls shared
+              tar -xvzf shared/pyhon-shared-${{steps.releasever.outputs.tag_name}}.tar.gz 
+              dir=$(ls | grep -i  "Devops-Andrey-pyhon-shared")
+              cp $dir/dist/Shared-0.0.0.tar.gz .        
+              
+########################################################
+##### SonarQube scan                                 ####           
+#########################################################
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=my-private
+            -Dsonar.projectKey=${{ github.event.repository.name }}
+            -Dsonar.branch.name=development
+            -Dsonar.projectVersion=${{ env.NEWRELEASEVER}}
+            -Dsonar.python.version=3.8
+            -Dsonar.pullrequest.github.summary_comment=true 
+                 
+      - name: SonarQube Quality Gate check
+        id: sonarqube-quality-gate-check
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }} 
+
+########################################################
+##### Docker file build & uploaded to docker reigtry ####           
+#########################################################
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+           aws-region: eu-west-1
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Get short SHA
+        id: slug
+        env:
+         IMAGE_TAG: ${{ github.sha }}
+        run: echo "sha7=$(echo ${IMAGE_TAG::7})" >> $GITHUB_OUTPUT
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+           ECR_REPOSITORY: ${{ github.event.repository.name }}
+           SSH_KEY: ${{ secrets.GITHUB_SSH_KEY }}
+           BRANCH_ENV: development
+        run: |
+         
+         DOCKER_BUILDKIT=1 docker build  --build-arg SSH_KEY=${SSH_KEY} --build-arg VERSION=${{  env.NEWRELEASEVER }} -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:${{  env.NEWRELEASEVER }} --no-cache .
+#########################################################
+##### Docker image Snyk scan                         ####           
+#########################################################               
+               
+      - name: Run Snyk to check Docker image for vulnerabilities
+        uses: snyk/actions/docker@master
+        env:
+         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ github.event.repository.name }}:${{  env.NEWRELEASEVER }}
+          args: --severity-threshold=high --policy-path=.snyk
+                          
+           
+#########################################################
+##### Docker file uploaded to docker reigtry         ####           
+#########################################################
+      
+      - name: push image to Amazon ECR
+        env:
+           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+           ECR_REPOSITORY: ${{ github.event.repository.name }}
+           SSH_KEY: ${{ secrets.GITHUB_SSH_KEY }}
+           BRANCH_ENV: development
+        run: |
+               docker push ${ECR_REGISTRY}/${ECR_REPOSITORY} --all-tags
+           
+#########################################################
+##### Push tag / release to develop branch           ####
+#########################################################
+
+      - uses: ncipollo/release-action@v1
+        with:
+           tag: ${{ env.NEWRELEASEVER}} 
+#########################################################
+##### Slack Notification                             ####
+#########################################################
+
+      - name: Slack Notification
+        continue-on-error: true
+        if: ${{ always() }}
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_CHANNEL: devops
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_ICON: https://my-backet.s3-eu-east-1.amazonaws.com/MyIcon.png
+          SLACK_MESSAGE: '${{ github.event.repository.name }} ${{  env.NEWRELEASEVER }} status: ${{ job.status }}'
+          SLACK_TITLE: Post Title
+          SLACK_USERNAME: my-username
+          SLACK_WEBHOOK: ${{ secrets.DEVOPS_SLACK_WEBHOOK }}
+          
