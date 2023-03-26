@@ -1,0 +1,130 @@
+ name : Ci process
+ on:
+   workflow_call:
+   
+ jobs:
+ 
+    CI:
+     name: Ci process
+     if: startsWith(github.head_ref, 'patch/') || startsWith(github.head_ref, 'feature/') || startsWith(github.head_ref, 'release/')
+     runs-on: ubuntu-latest
+     steps:
+     - name: Checks out repository
+       uses: actions/checkout@v3
+       with:
+        fetch-depth: 0 
+        
+#########################################################
+#####  login to AWS Ecr to get pyhton base image      ###           
+#########################################################
+
+     - name: Configure AWS credentials
+       if: |
+            contains(github.event.repository.name, 'python-scrapers') ||
+            contains(github.event.repository.name, 'python-post-rules') ||
+            contains(github.event.repository.name, 'python-model')
+            
+            
+       uses: aws-actions/configure-aws-credentials@v1-node16
+       with:
+         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+         aws-region: eu-west-1
+     - name: Login to Amazon ECR
+       if: |
+            contains(github.event.repository.name, 'python-scrapers') ||
+            contains(github.event.repository.name, 'python-post-rules') ||
+            contains(github.event.repository.name, 'python-model')
+         
+       id: login-ecr
+       uses: aws-actions/amazon-ecr-login@v1
+       
+#########################################################
+##### Get Shared Library from Devops-Andrey-pyhon-shared        ####
+#########################################################
+
+     - name: get shared library files
+       if: | 
+            contains(github.event.repository.name, 'python-bo-') ||
+            contains(github.event.repository.name, 'python-phone-recognizer')
+            
+       uses: robinraju/release-downloader@v1.7
+       id : releasever
+       with:
+         token: ${{ secrets.GITHUB_TOKEN }}
+         repository: "Devops-Andrey/pyhon-shared"
+         latest: true
+         tarBall: true
+         out-file-path : shared
+     - name: Get Shared Library from pyhon-shared
+       if:  | 
+            contains(github.event.repository.name, 'python-bo-') ||
+            contains(github.event.repository.name, 'python-phone-recognizer')
+       run: |
+             ls shared
+             tar -xvzf shared/il-shany-shared-${{steps.releasever.outputs.tag_name}}.tar.gz 
+             dir=$(ls | grep -i  "Devops-Andrey-pyhon-shared")
+             cp $dir/dist/Shared-0.0.0.tar.gz .
+             
+     - name: Docker build
+       env:
+           SSH_KEY: ${{ secrets.GITHUB_SSH_KEY }}
+       run: |
+       
+              DOCKER_BUILDKIT=1 docker build --build-arg SSH_KEY=${SSH_KEY}  -t testbuild:latest .
+       
+         
+#########################################################
+##### Docker image Snyk scan                         ####           
+#########################################################               
+
+     - name: Run Snyk to check Docker image for vulnerabilities
+       uses: snyk/actions/docker@master
+       id: snyk
+       env:
+         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+       with:
+          args: --severity-threshold=high --policy-path=.snyk 
+          image: testbuild:latest
+          json: true
+     - name: write snyk result to file
+       if: ${{ always() }}
+       run: |
+             touch result.txt
+             echo "Snyk Scan:" >> result.txt
+             jq ' .summary   ' snyk.json  | sed 's|[",]||g' >> result.txt
+             jq '.vulnerabilities[] | {"ID": .id, "Title": .title, "Severity": .severity, "URL": ("https://snyk.io/vuln/" + (.id | tostring))}' snyk.json >> result.txt
+             cat result.txt | sed 's|[{"},]||g' > final_result.txt
+              
+            
+     - name: Update snyk result as pr comment
+       if: ${{ always() }}
+       uses: thollander/actions-comment-pull-request@v2
+       with:
+        filePath: final_result.txt
+     
+         
+#########################################################
+##### sonarcloud scan                                ####           
+#########################################################
+
+     - name: SonarQube Scan
+       uses: SonarSource/sonarcloud-github-action@master
+       env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+       with:
+         args: >
+            -Dsonar.organization=my-private
+            -Dsonar.projectKey=${{ github.event.repository.name }}
+            -Dsonar.python.version=3.8
+            -Dsonar.pullrequest.github.summary_comment=true 
+            -Dsonar.scm.disabled=true
+ 
+     - name: SonarQube Quality Gate check
+       id: sonarqube-quality-gate-check
+       uses: sonarsource/sonarqube-quality-gate-action@master
+       timeout-minutes: 5
+       env:
+         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }} 
+ 
